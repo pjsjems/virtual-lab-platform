@@ -102,7 +102,7 @@
 <input type="file" id="importDB" accept="application/json,.json" class="hidden">
 <input type="file" id="importCSV" accept=".csv,text/csv" class="hidden">
 <script>
-/* Configuration de la synchronisation infonuagique — Virtual Lab Platform V10 (mode hybride, plusieurs écoles, Lab Genie) */
+/* Configuration de la synchronisation infonuagique — Virtual Lab Platform V10.1 (mode hybride, plusieurs écoles, Lab Genie) */
 window.VLP_STORAGE_CONFIG={
  mode:'hybrid',
  firebase:{
@@ -133,6 +133,7 @@ window.VLP_STORAGE_CONFIG={
    ===================================================================== */
 (function(G){
 const PREFIX='lc4_';
+const devViaSet=v=>{try{localStorage.setItem('lc4__devvia',v)}catch(e){}};
 const CFG_KEY='lc4__storage',META_KEY='lc4__syncmeta',CURSOR_KEY='lc4__synccursor',SYNCED_KEY='lc4__synced',TENANT_KEY='lc4__tenant';
 const DEFAULT_SYNC_KEYS=['db','lessons'];
 const FIREBASE_SDK='10.12.2';
@@ -212,7 +213,12 @@ class FirebaseProvider extends StorageProvider{
   this.user=await this._authenticate();
   this.col=fsM.collection(this.db,this.o.root,this.o.tenant,'recs');
   /* Adhésion de l’appareil à l’établissement (règles Firestore : code d’adhésion vérifié côté serveur) */
-  if(this.user&&this.o.joinCode){try{const mref=fsM.doc(this.db,this.o.root,this.o.tenant,'members',this.user.uid);const ms=await fsM.getDoc(mref).catch(()=>null);if(!ms||!ms.exists())await fsM.setDoc(mref,{role:'member',code:String(this.o.joinCode),at:fsM.serverTimestamp()})}catch(e){console.warn('[storage] adhésion refusée :',e&&e.code||e)}}
+  if(this.user&&this.o.joinCode){try{const mref=fsM.doc(this.db,this.o.root,this.o.tenant,'members',this.user.uid);const ms=await fsM.getDoc(mref).catch(()=>null);if(!ms||!ms.exists()){await fsM.setDoc(mref,{role:'member',code:String(this.o.joinCode),at:fsM.serverTimestamp()});devViaSet('join')}}catch(e){console.warn('[storage] adhésion refusée :',e&&e.code||e)}}
+  /* V10 — lien de connexion d’un appareil administrateur (#vlp-dev=CODE) : invitation à usage unique, valable quelques jours */
+  if(this.user&&this.o.devCode){const code=String(this.o.devCode);try{const mref=fsM.doc(this.db,this.o.root,this.o.tenant,'members',this.user.uid);const ms=await fsM.getDoc(mref).catch(()=>null);
+    if(!ms||!ms.exists()){const iref=fsM.doc(this.db,this.o.root,this.o.tenant,'invites',code);await fsM.setDoc(mref,{role:'member',inv:code,at:fsM.serverTimestamp()});devViaSet('admin');try{await fsM.deleteDoc(iref)}catch(e){}this.devResult='ok'}else{devViaSet('admin');this.devResult='ok'}}
+   catch(e){this.devResult='bad';console.warn('[storage] lien de connexion refusé :',e&&e.code||e)}
+   finally{try{const sv=JSON.parse(localStorage.getItem(CFG_KEY)||'null');if(sv&&sv.firebase){delete sv.firebase.devCode;localStorage.setItem(CFG_KEY,JSON.stringify(sv))}}catch(e){}}}
   this.ready=true;return true}
  /* Point d’extension AUTHENTIFICATION : 'anonymous' | 'external' (connexion gérée par AuthBridge) | 'none' */
  async _authenticate(){const A=this.authM;if(this.o.auth==='none')return null;
@@ -220,6 +226,13 @@ class FirebaseProvider extends StorageProvider{
   if(this.o.auth==='anonymous'){const c=await A.signInAnonymously(this.auth);return c.user}
   return null}
  ref(k){return this.fs.doc(this.col,enc(k))}
+ /* V10 — appareils : adhésion de cet appareil, clés de connexion et invitations (sous-collections de l’école) */
+ _d(sub,id){return this.fs.doc(this.db,this.o.root,this.o.tenant,sub,id)}
+ async memberSelf(){await this.init();if(!this.user)return null;try{const s=await this.fs.getDoc(this._d('members',this.user.uid));return s.exists()?s.data():null}catch(e){return null}}
+ async enroll(f){await this.init();await this.fs.setDoc(this._d('members',this.user.uid),Object.assign({role:'member'},f,{at:this.fs.serverTimestamp()}))}
+ async dget(sub,id){await this.init();const s=await this.fs.getDoc(this._d(sub,id));return s.exists()?s.data():null}
+ async dset(sub,id,d){await this.init();await this.fs.setDoc(this._d(sub,id),d)}
+ async ddel(sub,id){await this.init();await this.fs.deleteDoc(this._d(sub,id))}
  async save(k,d){await this.init();await this.fs.setDoc(this.ref(k),{k,d:JSON.stringify(d),t:now(),u:this.fs.serverTimestamp(),del:false,by:this.user&&this.user.uid||''});return true}
  async load(k){await this.init();const s=await this.fs.getDoc(this.ref(k));if(!s.exists())return undefined;const v=s.data();return v.del?undefined:safeJSON(v.d)}
  async delete(k){await this.init();await this.fs.setDoc(this.ref(k),{k,d:'null',t:now(),u:this.fs.serverTimestamp(),del:true,by:this.user&&this.user.uid||''});return true}
@@ -397,11 +410,12 @@ const AuthBridge={
    (https://…/#vlp-join=CODE). Il est alors gardé sur l’appareil, puis retiré de l’adresse. */
 function readConfig(){const fromPage=G.VLP_STORAGE_CONFIG;let saved=null;try{saved=JSON.parse(localStorage.getItem(CFG_KEY)||'null')}catch(e){}
  /* Lien d’inscription : #vlp-join=CODE (V6) et, en V8, #vlp-school=IDENTIFIANT&vlp-join=CODE pour une autre école */
- try{const h=typeof location!=='undefined'?(location.hash||''):'';const m=/[#&]vlp-join=([^&]+)/.exec(h),sc=/[#&]vlp-school=([^&]+)/.exec(h);
-  if(m||sc){saved=Object.assign({},saved||{});saved.firebase=Object.assign({},saved.firebase||{});if(m)saved.firebase.joinCode=decodeURIComponent(m[1]);if(sc)saved.firebase.tenant=decodeURIComponent(sc[1]).toLowerCase().replace(/[^a-z0-9-]/g,'');localStorage.setItem(CFG_KEY,JSON.stringify(saved));history.replaceState(null,'',location.pathname+location.search)}}catch(e){}
+ try{const h=typeof location!=='undefined'?(location.hash||''):'';const m=/[#&]vlp-join=([^&]+)/.exec(h),sc=/[#&]vlp-school=([^&]+)/.exec(h),dv=/[#&]vlp-dev=([^&]+)/.exec(h);
+  if(m||sc||dv){saved=Object.assign({},saved||{});saved.firebase=Object.assign({},saved.firebase||{});if(m)saved.firebase.joinCode=decodeURIComponent(m[1]);if(dv)saved.firebase.devCode=decodeURIComponent(dv[1]).replace(/[^A-Za-z0-9]/g,'').slice(0,40);if(sc)saved.firebase.tenant=decodeURIComponent(sc[1]).toLowerCase().replace(/[^a-z0-9-]/g,'');localStorage.setItem(CFG_KEY,JSON.stringify(saved));history.replaceState(null,'',location.pathname+location.search)}}catch(e){}
  const out=Object.assign({mode:'local'},saved||{},fromPage||{});
  if((saved&&saved.firebase)||(fromPage&&fromPage.firebase))out.firebase=Object.assign({},saved&&saved.firebase||{},fromPage&&fromPage.firebase||{});
  if(saved&&saved.firebase&&saved.firebase.joinCode&&!(fromPage&&fromPage.firebase&&fromPage.firebase.joinCode))out.firebase.joinCode=saved.firebase.joinCode;
+ if(saved&&saved.firebase&&saved.firebase.devCode&&out.firebase)out.firebase.devCode=saved.firebase.devCode;
  /* L’école choisie par lien d’inscription l’emporte sur l’école par défaut de la page */
  if(saved&&saved.firebase&&saved.firebase.tenant&&out.firebase)out.firebase.tenant=saved.firebase.tenant;
  /* Changement d’école sur cet appareil : les données de l’ancienne école sont mises de côté (elles restent en ligne), jamais envoyées à la nouvelle */
@@ -20540,7 +20554,7 @@ function finOpen(){return ((cfg().openLabs)||[]).includes('fin')}
      réinitialisation, et avant toute réception qui retirerait des comptes.
    • Indicateur de synchronisation (administrateurs et profs).
    ===================================================================== */
-const VLP_VERSION='10.0';
+const VLP_VERSION='10.1';
 const SAFE=(function(){
  const M=VLP_STORAGE.manager,SNAP='lc4__snaps',MAXS=3;
  const list=()=>{try{const a=JSON.parse(localStorage.getItem(SNAP)||'[]');return Array.isArray(a)?a:[]}catch(e){return[]}};
@@ -20564,7 +20578,7 @@ renderLogin=function(){_renderLoginV7();const M=SAFE.M;if(!SAFE.isCloud()||!M.fr
  f.insertAdjacentHTML('afterbegin',`<div id="lgSync" class="rounded-2xl px-4 py-3 bg-sky-500/15 border border-sky-400/40 text-sm text-sky-100 flex gap-3 items-start"><i data-lucide="refresh-cw" class="w-5 h-5 shrink-0 animate-spin mt-0.5"></i><div><b>${tr('Chargement des données de l’école…','Loading the school’s data…')}</b><div class="text-sky-200/80 text-xs mt-1">${tr('Cet appareil se connecte pour la première fois à la base de l’école. La connexion sera possible dans un instant.','This device is connecting to the school’s database for the first time. Sign-in will be available in a moment.')}</div><div id="lgSyncAct" class="mt-2 hidden"></div></div></div>`);icons();
  const prev=f.onsubmit;f.onsubmit=e=>{if(M.fresh&&!SAFE.offlineOK){e.preventDefault();return}return prev&&prev(e)};
  clearTimeout(SAFE.lgT);SAFE.lgT=setTimeout(()=>{if(!M.fresh||ROUTE.s!=='login')return;const a=$('#lgSyncAct');if(!a)return;a.classList.remove('hidden');const err=M.lastError&&String(M.lastError.code||M.lastError.message||'');
-  a.innerHTML=`<div class="text-xs text-amber-200 mb-2">${/permission/i.test(err)?tr('Cet appareil n’est pas encore inscrit auprès de l’école : ouvre le lien d’inscription reçu de l’administrateur.','This device is not yet enrolled with the school: open the enrolment link you received from the administrator.'):tr('La base de l’école ne répond pas encore. Vérifie la connexion Internet.','The school’s database is not responding yet. Check the Internet connection.')}</div><div class="flex flex-wrap gap-2"><button type="button" id="lgRetry" class="px-3 py-1.5 rounded-lg bg-sky-600 text-white text-xs font-bold">${tr('Réessayer','Try again')}</button><button type="button" id="lgOff" class="px-3 py-1.5 rounded-lg border border-sky-400/50 text-xs font-bold">${tr('Continuer hors ligne','Continue offline')}</button></div>`;
+  a.innerHTML=`<div class="text-xs text-amber-200 mb-2">${/permission/i.test(err)?tr('Cet appareil n’est pas encore relié à l’école : connecte-toi avec ton identifiant et ton mot de passe.','This device is not yet linked to the school: sign in with your username and password.'):tr('La base de l’école ne répond pas encore. Vérifie la connexion Internet.','The school’s database is not responding yet. Check the Internet connection.')}</div><div class="flex flex-wrap gap-2"><button type="button" id="lgRetry" class="px-3 py-1.5 rounded-lg bg-sky-600 text-white text-xs font-bold">${tr('Réessayer','Try again')}</button><button type="button" id="lgOff" class="px-3 py-1.5 rounded-lg border border-sky-400/50 text-xs font-bold">${tr('Continuer hors ligne','Continue offline')}</button></div>`;
   $('#lgRetry').onclick=()=>{M.flush(true);renderLogin()};$('#lgOff').onclick=()=>{if(!confirm(tr('Hors ligne, tu verras seulement les données déjà présentes sur cet appareil. Rien ne sera envoyé à l’école avant que ses données aient été reçues. Continuer ?','Offline, you will only see the data already on this device. Nothing will be sent to the school until its data has been received. Continue?')))return;SAFE.offlineOK=true;renderLogin()}},12000)};
 SAFE.M.events.on('ready',()=>{if(ROUTE.s==='login'&&$('#lgSync'))renderLogin()});
 /* Un appareil qui s’était connecté hors ligne reçoit enfin les vraies données : reconnexion obligatoire */
@@ -20574,7 +20588,7 @@ SAFE.M.events.on('remote',({fresh})=>{if(fresh&&ME){setTimeout(()=>{logout();toa
 const SYNC_UI={ok:['cloud-check','text-emerald-500',['Synchronisé','Synced']],syncing:['refresh-cw','text-sky-500 animate-spin',['Synchronisation…','Syncing…']],offline:['cloud-off','text-amber-500',['Hors ligne','Offline']],error:['triangle-alert','text-rose-500',['Erreur de synchronisation','Sync error']],idle:['cloud','text-slate-400',['En attente','Waiting']]};
 function syncBtnHTML(){const M=SAFE.M;const st=SYNC_UI[M.status]||SYNC_UI.idle;const p=M.pendingCount();return `<i data-lucide="${st[0]}" class="w-4 h-4 ${st[1]}"></i>${p?`<span class="text-[10px] font-bold text-amber-600">${p}</span>`:''}`}
 function syncExplain(){const M=SAFE.M,s=VLP_STORAGE.status();const err=s.error||'';const t=(M.cfg.firebase&&M.cfg.firebase.tenant)||'—';
- const why=/permission/i.test(err)?tr('Cet appareil n’est pas autorisé à écrire dans la base de l’école. Ouvre une fois le lien d’inscription (#vlp-join=…) fourni par l’administrateur, puis recharge la page.','This device is not allowed to write to the school’s database. Open the enrolment link (#vlp-join=…) from the administrator once, then reload.'):err?esc(err):'';
+ const why=/permission/i.test(err)?tr('Cet appareil n’est pas autorisé à écrire dans la base de l’école. Déconnecte-toi, puis reconnecte-toi avec ton identifiant et ton mot de passe pour relier l’appareil.','This device is not allowed to write to the school’s database. Sign out, then sign in again with your username and password to link the device.'):err?esc(err):'';
  modal(`<div class="flex items-center gap-2 mb-3"><i data-lucide="cloud" class="w-5 h-5 text-sky-500"></i><h2 class="text-lg font-bold">${tr('Synchronisation des données','Data sync')}</h2><button class="btn btn-g !p-1.5 ml-auto" id="syX"><i data-lucide="x"></i></button></div>
  <table class="w-full text-sm"><tbody>${[[tr('École','School'),esc(t)],[tr('Mode','Mode'),esc(s.mode)],[tr('État','Status'),P2((SYNC_UI[s.status]||SYNC_UI.idle)[2])],[tr('Modifications en attente d’envoi','Changes waiting to be sent'),s.pending],[tr('Dernière synchronisation','Last sync'),s.lastSync?new Date(s.lastSync).toLocaleString(loc()):'—'],[tr('Données de l’école reçues sur cet appareil','School data received on this device'),SAFE.M.synced?tr('Oui','Yes'):tr('Pas encore','Not yet')]].map(([a,b])=>`<tr class="border-b border-slate-100 dark:border-slate-800"><td class="py-1.5 pr-3 text-slate-500">${a}</td><td class="py-1.5 font-semibold">${b}</td></tr>`).join('')}</tbody></table>
  ${why?`<div class="mt-3 rounded-xl p-3 text-sm bg-rose-50 dark:bg-rose-950/30 border border-rose-200 dark:border-rose-800/50">${why}</div>`:''}
@@ -23399,6 +23413,122 @@ function lvlCardMount(){const c=document.getElementById('lvlCard');if(!c)return;
   const cf=cfg();if(Object.keys(off).length)cf.lvlOff=off;else delete cf.lvlOff;audit('settings.levels',Object.keys(off).join(',')||'—');resetPools();saveDB();
   $('#lvlMsg').textContent=tr('Niveaux enregistrés.','Levels saved.');toast(tr('Niveaux enregistrés pour toute l’école.','Levels saved for the whole school.'),'ok')}}
 {const _s=admSettings;admSettings=function(){_s.apply(this,arguments);const body=document.getElementById('conBody');if(!body||document.getElementById('lvlCard'))return;const grid=body.querySelector('.grid')||body;grid.insertAdjacentHTML('beforeend',lvlCardHTML());icons();lvlCardMount()}}
+/* =====================================================================
+   V10.1 — CONNEXION DES APPAREILS PAR IDENTIFIANTS
+   • Tout utilisateur se connecte sur un nouvel appareil avec le lien habituel,
+     son identifiant (ou courriel) et son mot de passe : l’appareil est inscrit
+     automatiquement auprès de l’école.
+     Principe : à chaque mot de passe défini ou utilisé, la plateforme publie une
+     « clé de connexion » vlp/{école}/keys/{clé}. L’identifiant de ce document est
+     dérivé lentement (PBKDF2, 150 000 itérations) de l’école, de l’identifiant et
+     du mot de passe : seul quelqu’un qui connaît le mot de passe peut le retrouver.
+     Les règles Firestore n’acceptent l’inscription que si cette clé existe.
+   • Comptes administrateurs : pas d’inscription par identifiants. Un nouvel appareil
+     d’administrateur s’active avec un lien de connexion à usage unique, créé depuis
+     un appareil déjà connecté (Administration → Données) ou par le super-administrateur.
+     Le premier appareil de l’administrateur principal utilise le lien d’activation
+     de l’école (créé avec l’école).
+   • Super-administrateur : lien permanent …/#vlp-super (console des écoles, connexion Firebase).
+   ===================================================================== */
+const DEV={queue:[],busy:false,PEND:{},tries:0,lockUntil:0};
+const devVia=()=>{try{return localStorage.getItem('lc4__devvia')}catch(e){return null}};
+const devCloud=()=>{const M=VLP_STORAGE.manager;return M.mode!=='local'&&M.cloud&&typeof M.cloud.dget==='function'?M.cloud:null};
+const devTenant=()=>{const M=VLP_STORAGE.manager;return(M.cfg.firebase&&M.cfg.firebase.tenant)||'default'};
+const devBase=()=>location.origin+location.pathname;
+const devSchoolLink=t=>`${devBase()}#vlp-school=${encodeURIComponent(t||devTenant())}`;
+const devConnectLink=(t,c)=>`${devBase()}#vlp-school=${encodeURIComponent(t)}&vlp-dev=${encodeURIComponent(c)}`;
+const devSuperLink=()=>`${devBase()}#vlp-super`;
+/* Clé de connexion : PBKDF2-SHA-256, 150 000 itérations ; le sel lie la clé à l’école et à l’identifiant */
+async function devKey(tenant,login,pw){const sub=window.crypto&&crypto.subtle;if(!sub)throw new Error(tr('Ce navigateur ne permet pas la connexion sécurisée (page non https).','This browser cannot do the secure sign-in (page not on https).'));
+ const enc=new TextEncoder();const base=await sub.importKey('raw',enc.encode(String(pw)),'PBKDF2',false,['deriveBits']);
+ const bits=await sub.deriveBits({name:'PBKDF2',hash:'SHA-256',salt:enc.encode('vlp-dev|'+tenant+'|'+String(login).trim().toLowerCase()),iterations:150000},base,160);
+ return 'k'+[...new Uint8Array(bits)].map(b=>b.toString(16).padStart(2,'0')).join('')}
+const devReg=()=>{const c=cfg();return c.devk=c.devk||{}};
+/* Publie (ou remplace) la clé de connexion d’un compte — appelée avec le mot de passe en clair, jamais conservé */
+function devKeySync(u,pw){if(!u||!pw||u.shadowOf||!devCloud())return;if(DEV.queue.some(j=>j.id===u.id&&j.pw===pw))return;DEV.queue.push({id:u.id,login:u.login,pw});devPump()}
+const devRegGet=id=>{const v=devReg()[id];return!v?null:typeof v==='string'?{k:v,a:null}:v};
+async function devPump(){if(DEV.busy)return;DEV.busy=true;const C=devCloud();
+ try{while(DEV.queue.length){const j=DEV.queue.shift();const u=DB.users.find(x=>x.id===j.id);if(!u||u.active===false)continue;
+  try{const k=await devKey(devTenant(),j.login,j.pw);const adm=u.role==='admin';const old=devRegGet(u.id);
+   if(!old||old.k!==k||old.a!==adm){await C.dset('keys',k,{u:String(u.id).slice(0,60),adm,t:Date.now()});if(old&&old.k!==k){try{await C.ddel('keys',old.k)}catch(e){}}devReg()[u.id]={k,a:adm};DEV.dirty=true}}
+  catch(e){console.warn('[appareils] clé non publiée :',e&&e.code||e)}
+  await new Promise(r=>setTimeout(r,0))}}
+ finally{DEV.busy=false;if(DEV.dirty){DEV.dirty=false;saveDB()}}}
+/* Comptes supprimés, désactivés ou dont le rôle change : leur clé est retirée ou mise à jour */
+async function devMaintain(){const C=devCloud();if(!C||!DB||!DB.cfg||!DB.cfg.devk)return;const reg=DB.cfg.devk;let ch=false;
+ for(const id of Object.keys(reg)){const r=devRegGet(id);const u=DB.users.find(x=>x.id===id);
+  if(!u||u.active===false){try{await C.ddel('keys',r.k)}catch(e){}delete reg[id];ch=true;continue}
+  const adm=u.role==='admin';if(r.a!==adm){try{await C.dset('keys',r.k,{u:String(id).slice(0,60),adm,t:Date.now()});reg[id]={k:r.k,a:adm};ch=true}catch(e){}}}
+ if(ch)saveDB()}
+/* Mots de passe définis par un administrateur ou un prof (création de compte, réinitialisation, import) :
+   le mot de passe en clair est gardé quelques instants en mémoire, le temps de publier la clé */
+{const _h=pwHash;pwHash=function(pw,salt){const h=_h(pw,salt);try{if(pw&&salt){DEV.PEND[salt]=pw;const ks=Object.keys(DEV.PEND);if(ks.length>500)delete DEV.PEND[ks[0]]}}catch(e){}return h}}
+{const _set=store.set;let t=null;store.set=(k,v)=>{_set(k,v);if(k!=='db'||!devCloud())return;clearTimeout(t);t=setTimeout(devAfterSave,800)}}
+async function devAfterSave(){try{const P=DEV.PEND;DEV.PEND={};const us=(DB.users||[]).filter(u=>u.salt&&P[u.salt]&&u.hash);let i=0;
+  for(const u of us){const pw=P[u.salt];if(_hRaw(pw,u.salt)===u.hash)devKeySync(u,pw);if(++i%10===0)await new Promise(r=>setTimeout(r,0))}
+  await devMaintain()}catch(e){console.warn('[appareils]',e)}}
+function _hRaw(pw,salt){let h=sha256(salt+':'+pw);for(let i=0;i<300;i++)h=sha256(h+salt);return h}
+
+/* ---------- Écran de connexion ---------- */
+function devFirstMsg(html,cls){const s=$('#lgSync');if(!s)return;s.className=`rounded-2xl px-4 py-3 text-sm flex gap-3 items-start ${cls||'bg-sky-500/15 border border-sky-400/40 text-sky-100'}`;s.innerHTML=html;icons()}
+const DEV_HELLO=()=>`<i data-lucide="smartphone" class="w-5 h-5 shrink-0 mt-0.5"></i><div><b>${tr('Premier accès sur cet appareil','First sign-in on this device')}</b><div class="text-sky-200/80 text-xs mt-1">${tr('Connecte-toi avec ton identifiant (ou courriel) et ton mot de passe habituels : l’appareil sera relié à ton école automatiquement.','Sign in with your usual username (or email) and password: the device will be linked to your school automatically.')}</div></div>`;
+async function devFirstLogin(login,pw){const C=devCloud();const err=m=>{$('#lgErr').textContent=m;const b=$('#lgBtn');if(b){b.disabled=false;b.classList.remove('opacity-50','cursor-not-allowed')}};
+ const now=Date.now();if(now<DEV.lockUntil)return err(tr(`Trop de tentatives. Réessaie dans ${Math.ceil((DEV.lockUntil-now)/1000)} s.`,`Too many attempts. Try again in ${Math.ceil((DEV.lockUntil-now)/1000)} s.`));
+ const b=$('#lgBtn');if(b){b.disabled=true;b.classList.add('opacity-50','cursor-not-allowed')}$('#lgErr').textContent='';
+ devFirstMsg(`<i data-lucide="loader" class="w-5 h-5 shrink-0 animate-spin mt-0.5"></i><div><b>${tr('Vérification du compte…','Checking the account…')}</b></div>`);
+ try{let mem=await C.memberSelf();
+  if(!mem){const k=await devKey(devTenant(),login,pw);let doc=null;try{doc=await C.dget('keys',k)}catch(e){if(!/permission/i.test(String(e&&e.code||e)))throw e}
+   if(!doc){DEV.tries++;if(DEV.tries>=5){DEV.lockUntil=Date.now()+60000;DEV.tries=0}devFirstMsg(DEV_HELLO());
+    return err(tr('Identifiant ou mot de passe incorrect. Si ton compte existait avant la mise à jour et que tu ne t’es pas encore connecté depuis, connecte-toi une fois sur un appareil de l’école ou demande à ton administrateur de redéfinir ton mot de passe.','Incorrect username or password. If your account existed before the update and you have not signed in since, sign in once on a school device or ask your administrator to reset your password.'))}
+   if(doc.adm){devFirstMsg(`<i data-lucide="shield-alert" class="w-5 h-5 shrink-0 mt-0.5"></i><div><b>${tr('Compte administrateur : lien de connexion nécessaire','Administrator account: connect link required')}</b><div class="text-xs mt-1">${tr('Pour protéger l’école, un nouvel appareil d’administrateur s’active avec un lien de connexion. Crée-le depuis un appareil où tu es déjà connecté (Administration → Données → « Lien de connexion pour un nouvel appareil »), ou demande-le au super-administrateur.','To protect the school, a new administrator device is activated with a connect link. Create it from a device where you are already signed in (Administration → Data → “Connect link for a new device”), or ask the super administrator.')}</div></div>`,'bg-amber-500/15 border border-amber-400/40 text-amber-100');return err('')}
+   await C.enroll({key:k,u:String(doc.u).slice(0,60)});try{localStorage.setItem('lc4__devvia','key')}catch(e){}}
+  devFirstMsg(`<i data-lucide="refresh-cw" class="w-5 h-5 shrink-0 animate-spin mt-0.5"></i><div><b>${tr('Appareil relié. Chargement des données de l’école…','Device linked. Loading the school’s data…')}</b></div>`);
+  const M=VLP_STORAGE.manager;try{document.activeElement&&document.activeElement.blur()}catch(e){}
+  for(let i=0;i<40&&M.fresh;i++){try{await M.flush(true)}catch(e){}if(M.fresh)await new Promise(r=>setTimeout(r,500))}
+  for(let i=0;i<30&&!(DB.users||[]).some(u=>String(u.login).toLowerCase()===login.toLowerCase());i++)await new Promise(r=>setTimeout(r,200));
+  if(M.fresh){devFirstMsg(DEV_HELLO());return err(tr('Les données de l’école n’arrivent pas encore. Vérifie la connexion Internet puis réessaie.','The school’s data is not arriving yet. Check the Internet connection and try again.'))}
+  renderLogin();$('#lgUser').value=login;$('#lgPw').value=pw;const f=$('#lgForm');f.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}))}
+ catch(e){devFirstMsg(DEV_HELLO());err(tr('Connexion impossible : ','Sign-in failed: ')+esc(String(e&&(e.code||e.message)||e)))}}
+{const _r=renderLogin;renderLogin=function(){_r();const C=devCloud();const f=$('#lgForm');if(!C||!f)return;const M=VLP_STORAGE.manager;
+ if(M.fresh&&!SAFE.offlineOK){const b=$('#lgBtn');if(b){b.disabled=false;b.classList.remove('opacity-50','cursor-not-allowed')}clearTimeout(SAFE.lgT);devFirstMsg(DEV_HELLO());
+  f.onsubmit=e=>{e.preventDefault();const login=$('#lgUser').value.trim(),pw=$('#lgPw').value;if(!login||!pw){$('#lgErr').textContent=tr('Entre ton identifiant et ton mot de passe.','Enter your username and password.');return}devFirstLogin(login,pw)};
+  if(C.devResult==='bad')$('#lgErr').textContent=tr('Ce lien de connexion n’est plus valable (déjà utilisé ou expiré). Demande-en un nouveau.','This connect link is no longer valid (already used or expired). Ask for a new one.');return}
+ const prev=f.onsubmit;f.onsubmit=e=>{const login=$('#lgUser').value.trim().toLowerCase(),pw=$('#lgPw').value;const u=(DB.users||[]).find(x=>String(x.login).toLowerCase()===login);
+  if(u&&u.role==='admin'&&devVia()==='key'&&pw&&_hRaw(pw,u.salt)===u.hash){e.preventDefault();$('#lgErr').textContent=tr('Compte administrateur : cet appareil a été relié par un autre compte. Active-le pour l’administration avec un lien de connexion (Administration → Données sur un appareil déjà connecté, ou super-administrateur).','Administrator account: this device was linked by another account. Activate it for administration with a connect link (Administration → Data on a device already signed in, or the super administrator).');return}
+  const r=prev?prev(e):undefined;if(ME&&u&&ME.id===u.id)devKeySync(u,pw);return r}}}
+
+/* ---------- Liens de connexion administrateur ---------- */
+const devCode=()=>{const a='ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';const r=new Uint32Array(24);crypto.getRandomValues(r);return[...r].map(x=>a[x%a.length]).join('')};
+async function devInviteCreate(F,db,tenant,by,days){const code=devCode();await F.setDoc(F.doc(db,'vlp',tenant,'invites',code),{exp:F.Timestamp.fromMillis(Date.now()+(days||3)*86400000),by:String(by||'').slice(0,80),t:Date.now()});return code}
+function devLinkModal(title,link,note){modal(`<div class="flex items-center gap-2 mb-3"><i data-lucide="link" class="w-5 h-5 text-sky-500"></i><h2 class="text-lg font-bold flex-1">${esc(title)}</h2><button class="btn btn-g !p-1.5" id="dlX"><i data-lucide="x"></i></button></div>
+ <div class="flex gap-2"><input class="inp mono !text-xs flex-1" readonly value="${esc(link)}" id="dlL"><button class="btn btn-g" id="dlC"><i data-lucide="copy"></i></button></div><p class="text-xs text-slate-500 mt-2">${note}</p>`);
+ $('#dlX').onclick=closeModal;$('#dlC').onclick=()=>{const i=$('#dlL');i.select();navigator.clipboard&&navigator.clipboard.writeText(i.value);toast(tr('Lien copié.','Link copied.'),'ok')}}
+const DEV_NOTE=()=>tr('Valable 3 jours, pour un seul appareil. Ouvre-le sur le nouvel appareil, puis connecte-toi avec ton identifiant et ton mot de passe d’administrateur. Ne l’envoie à personne d’autre.','Valid for 3 days, for one device only. Open it on the new device, then sign in with your administrator username and password. Do not send it to anyone else.');
+async function devAdminInvite(){const C=devCloud();if(!C){toast(tr('Disponible seulement avec la base en ligne.','Only available with the online database.'),'err');return}try{await C.init();const code=await devInviteCreate(C.fs,C.db,devTenant(),ME&&ME.id,3);audit('device.link',devTenant());saveDB();devLinkModal(tr('Lien de connexion pour un nouvel appareil','Connect link for a new device'),devConnectLink(devTenant(),code),DEV_NOTE())}catch(e){toast(tr('Lien non créé : ','Link not created: ')+esc(e.code||e.message),'err')}}
+/* Administration → Données : carte « Appareils » */
+{const _c=conData;conData=function(){_c.apply(this,arguments);const body=$('#conBody');if(!body||!devCloud()||!ME||ME.role!=='admin')return;const g=body.querySelector('.grid')||body;
+ g.insertAdjacentHTML('afterbegin',`<div class="card p-4 space-y-3" id="devCard">${h3('smartphone',tr('Appareils et connexion','Devices and sign-in'))}
+ <p class="text-sm text-slate-600 dark:text-slate-300">${tr('Profs et élèves se connectent sur n’importe quel appareil avec le lien de la plateforme, leur identifiant et leur mot de passe : l’appareil est relié automatiquement.','Teachers and students sign in on any device with the platform link, their username and their password: the device is linked automatically.')}</p>
+ <div class="text-xs text-slate-500">${tr('Lien de la plateforme pour cette école :','Platform link for this school:')}</div><div class="flex gap-2"><input class="inp mono !text-xs flex-1" readonly value="${esc(devSchoolLink())}" id="devSL"><button class="btn btn-g" id="devSLc"><i data-lucide="copy"></i></button></div>
+ <p class="text-sm text-slate-600 dark:text-slate-300">${tr('Un compte administrateur s’active sur un nouvel appareil avec un lien de connexion à usage unique :','An administrator account is activated on a new device with a single-use connect link:')}</p>
+ <button class="btn btn-p" id="devInv"><i data-lucide="link"></i>${tr('Lien de connexion pour un nouvel appareil','Connect link for a new device')}</button>
+ <p class="text-xs text-slate-500">${tr('Cet appareil : ','This device: ')}${devVia()==='key'?tr('relié par identifiants','linked by credentials'):devVia()==='admin'?tr('activé par lien de connexion','activated by connect link'):tr('activé par lien d’inscription','activated by enrolment link')}</p></div>`);icons();
+ $('#devSLc').onclick=()=>{const i=$('#devSL');i.select();navigator.clipboard&&navigator.clipboard.writeText(i.value);toast(tr('Lien copié.','Link copied.'),'ok')};$('#devInv').onclick=devAdminInvite}}
+/* Console super-admin : lien de connexion administrateur et lien de la plateforme pour chaque école */
+{const _p=schoolsPage;schoolsPage=async function(){await _p.apply(this,arguments);if(!SUPER.ok||!SUPER.list)return;
+ $$('[data-sulink]').forEach(b=>{const id=b.dataset.sulink;if(b.parentElement.querySelector(`[data-suinv="${id}"]`))return;b.insertAdjacentHTML('afterend',`<button class="btn btn-g !py-1 !text-xs" data-suinv="${esc(id)}"><i data-lucide="key-round"></i>${tr('Lien admin (nouvel appareil)','Admin link (new device)')}</button>`)});icons();
+ $$('[data-suinv]').forEach(b=>b.onclick=async()=>{const id=b.dataset.suinv;try{const code=await devInviteCreate(SUPER.fs,SUPER.db,id,'super:'+(SUPER.user.email||SUPER.user.uid),3);devLinkModal(tr('Lien de connexion administrateur','Administrator connect link')+' — '+id,devConnectLink(id,code),DEV_NOTE())}catch(e){toast(esc(e.code||e.message),'err')}})}}
+{const _m=schoolLinkModal;schoolLinkModal=function(id,name,code,cred){_m(id,name,code,cred);const L=$('#slL');if(!L)return;const box=L.parentElement;
+ box.previousElementSibling.textContent=tr('Lien d’activation du premier appareil de l’administrateur principal :','Activation link for the main administrator’s first device:');
+ box.insertAdjacentHTML('afterend',`<p class="text-sm mt-4">${tr('Lien de la plateforme pour tous les autres utilisateurs (profs, élèves) : ils se connectent avec leur identifiant et leur mot de passe, sans autre lien.','Platform link for all other users (teachers, students): they sign in with their username and password, with no other link.')}</p><div class="mt-2 flex gap-2"><input class="inp mono !text-xs flex-1" readonly value="${esc(devSchoolLink(id))}" id="slP"><button class="btn btn-g" id="slPc"><i data-lucide="copy"></i></button></div>`);icons();
+ $('#slPc').onclick=()=>{const i=$('#slP');i.select();navigator.clipboard&&navigator.clipboard.writeText(i.value);toast(tr('Lien copié.','Link copied.'),'ok')}}}
+
+/* ---------- Lien permanent du super-administrateur : …/#vlp-super ---------- */
+function devSuperShell(){if(!/vlp-super/.test(location.hash||''))return;let s=document.getElementById('superShell');if(!s){s=document.createElement('div');s.id='superShell';s.className='fixed inset-0 z-[55] overflow-y-auto bg-slate-50 dark:bg-[#071433] text-slate-800 dark:text-slate-100';document.body.appendChild(s)}
+ s.innerHTML=`<div class="max-w-6xl mx-auto p-4 md:p-6"><div class="flex flex-wrap items-center gap-2 mb-4"><div class="w-10 h-10 rounded-xl grid place-items-center bg-indigo-600 text-white"><i data-lucide="shield-check" class="w-5 h-5"></i></div><div class="flex-1"><div class="font-extrabold text-lg">${tr('Console du super-administrateur','Super administrator console')}</div><div class="text-xs text-slate-500">${tr('Lien permanent : garde-le dans tes favoris. La connexion se fait avec ton compte Firebase.','Permanent link: bookmark it. Sign-in uses your Firebase account.')}</div></div>${langSel('suLang','inp !w-auto')}<button class="btn btn-g" id="suBack"><i data-lucide="arrow-left"></i>${tr('Retour à la plateforme','Back to the platform')}</button></div><div id="conBody"></div></div>`;icons();
+ const ls=$('#suLang');if(ls)ls.onchange=e=>{LANG=e.target.value;store.set('lang',LANG);devSuperShell()};
+ $('#suBack').onclick=()=>{s.remove();history.replaceState(null,'',location.pathname+location.search);renderScreen()};schoolsPage()}
+window.addEventListener('hashchange',devSuperShell);setTimeout(devSuperShell,0);
 /* =====================================================================
    DÉMARRAGE
    ===================================================================== */
